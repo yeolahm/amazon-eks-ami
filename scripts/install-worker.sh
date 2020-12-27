@@ -24,6 +24,7 @@ validate_env_set() {
 validate_env_set BINARY_BUCKET_NAME
 validate_env_set BINARY_BUCKET_REGION
 validate_env_set DOCKER_VERSION
+validate_env_set CONTAINERD_VERSION
 validate_env_set CNI_PLUGIN_VERSION
 validate_env_set KUBERNETES_VERSION
 validate_env_set KUBERNETES_BUILD_DATE
@@ -121,6 +122,8 @@ if [[ "$INSTALL_DOCKER" == "true" ]]; then
     sudo mv $TEMPLATE_DIR/docker-daemon.json /etc/docker/daemon.json
     sudo chown root:root /etc/docker/daemon.json
 
+    sudo yum downgrade -y containerd-${CONTAINERD_VERSION}
+
     # Enable docker daemon to start on boot.
     sudo systemctl daemon-reload
     sudo systemctl enable docker
@@ -192,12 +195,12 @@ else
         echo "AWS cli present - using it to copy binaries from s3."
         aws s3 cp --region $BINARY_BUCKET_REGION $S3_PATH/${CNI_PLUGIN_FILENAME}.tgz .
         aws s3 cp --region $BINARY_BUCKET_REGION $S3_PATH/${CNI_PLUGIN_FILENAME}.tgz.sha256 .
-        sudo sha256sum -c "${CNI_PLUGIN_FILENAME}.tgz.sha256"
     else
         echo "AWS cli missing - using wget to fetch cni binaries from s3. Note: This won't work for private bucket."
         sudo wget "$S3_URL_BASE/${CNI_PLUGIN_FILENAME}.tgz"
         sudo wget "$S3_URL_BASE/${CNI_PLUGIN_FILENAME}.tgz.sha256"
     fi
+    sudo sha256sum -c "${CNI_PLUGIN_FILENAME}.tgz.sha256"
 fi
 sudo tar -xvf "${CNI_PLUGIN_FILENAME}.tgz" -C /opt/cni/bin
 rm "${CNI_PLUGIN_FILENAME}.tgz"
@@ -227,6 +230,11 @@ sudo mv $TEMPLATE_DIR/eni-max-pods.txt /etc/eks/eni-max-pods.txt
 sudo mv $TEMPLATE_DIR/bootstrap.sh /etc/eks/bootstrap.sh
 sudo chmod +x /etc/eks/bootstrap.sh
 
+if [[ -n "$SONOBUOY_E2E_REGISTRY" ]]; then
+    sudo mv $TEMPLATE_DIR/sonobuoy-e2e-registry-config /etc/eks/sonobuoy-e2e-registry-config
+    sudo sed -i s,SONOBUOY_E2E_REGISTRY,$SONOBUOY_E2E_REGISTRY,g /etc/eks/sonobuoy-e2e-registry-config
+fi
+
 ################################################################################
 ### AMI Metadata ###############################################################
 ################################################################################
@@ -252,33 +260,44 @@ kernel.panic_on_oops=1
 EOF
 
 ################################################################################
+### Setting up sysctl properties ###############################################
+################################################################################
+
+echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
+echo vm.max_map_count=524288 | sudo tee -a /etc/sysctl.conf
+
+
+################################################################################
 ### Cleanup ####################################################################
 ################################################################################
 
-# Clean up yum caches to reduce the image size
-sudo yum clean all
-sudo rm -rf \
-    $TEMPLATE_DIR  \
-    /var/cache/yum
+CLEANUP_IMAGE="${CLEANUP_IMAGE:-true}"
+if [[ "$CLEANUP_IMAGE" == "true" ]]; then
+    # Clean up yum caches to reduce the image size
+    sudo yum clean all
+    sudo rm -rf \
+        $TEMPLATE_DIR  \
+        /var/cache/yum
 
-# Clean up files to reduce confusion during debug
-sudo rm -rf \
-    /etc/hostname \
-    /etc/machine-id \
-    /etc/resolv.conf \
-    /etc/ssh/ssh_host* \
-    /home/ec2-user/.ssh/authorized_keys \
-    /root/.ssh/authorized_keys \
-    /var/lib/cloud/data \
-    /var/lib/cloud/instance \
-    /var/lib/cloud/instances \
-    /var/lib/cloud/sem \
-    /var/lib/dhclient/* \
-    /var/lib/dhcp/dhclient.* \
-    /var/lib/yum/history \
-    /var/log/cloud-init-output.log \
-    /var/log/cloud-init.log \
-    /var/log/secure \
-    /var/log/wtmp
+    # Clean up files to reduce confusion during debug
+    sudo rm -rf \
+        /etc/hostname \
+        /etc/machine-id \
+        /etc/resolv.conf \
+        /etc/ssh/ssh_host* \
+        /home/ec2-user/.ssh/authorized_keys \
+        /root/.ssh/authorized_keys \
+        /var/lib/cloud/data \
+        /var/lib/cloud/instance \
+        /var/lib/cloud/instances \
+        /var/lib/cloud/sem \
+        /var/lib/dhclient/* \
+        /var/lib/dhcp/dhclient.* \
+        /var/lib/yum/history \
+        /var/log/cloud-init-output.log \
+        /var/log/cloud-init.log \
+        /var/log/secure \
+        /var/log/wtmp
+fi
 
 sudo touch /etc/machine-id

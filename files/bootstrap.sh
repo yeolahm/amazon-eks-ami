@@ -24,6 +24,8 @@ function print_help {
     echo "--aws-api-retry-attempts Number of retry attempts for AWS API call (DescribeCluster) (default: 3)"
     echo "--docker-config-json The contents of the /etc/docker/daemon.json file. Useful if you want a custom config differing from the default one in the AMI"
     echo "--dns-cluster-ip Overrides the IP address to use for DNS queries within the cluster. Defaults to 10.100.0.10 or 172.20.0.10 based on the IP address of the primary interface"
+    echo "--pause-container-account The AWS account (number) to pull the pause container from"
+    echo "--pause-container-version The tag of the pause container"
 }
 
 POSITIONAL=()
@@ -161,7 +163,7 @@ get_resource_to_reserve_in_range() {
 # density so we are calculating the amount of memory to reserve for Kubernetes systems daemons by
 # considering the maximum number of pods this instance type supports.
 # Args:
-#   $1 the instance type of the worker node
+#   $1 the max number of pods per instance type (MAX_PODS) based on values from /etc/eks/eni-max-pods.txt
 # Return:
 #   memory to reserve in Mi for the kubelet
 get_memory_mebibytes_to_reserve() {
@@ -291,10 +293,10 @@ INSTANCE_TYPE=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169
 #calculate the max number of pods per instance type
 MAX_PODS_FILE="/etc/eks/eni-max-pods.txt"
 set +o pipefail
-MAX_PODS=$(cat $MAX_PODS_FILE | awk "/^$INSTANCE_TYPE/"' { print $2 }')
+MAX_PODS=$(cat $MAX_PODS_FILE | awk "/^${INSTANCE_TYPE:-unset}/"' { print $2 }')
 set -o pipefail
-if [ -z "$MAX_PODS" ]; then
-    echo 'No entry for $INSTANCE_TYPE in $MAX_PODS_FILE'
+if [ -z "$MAX_PODS" ] || [ -z "$INSTANCE_TYPE" ]; then
+    echo "No entry for type '$INSTANCE_TYPE' in $MAX_PODS_FILE"
     exit 1
 fi
 
@@ -313,6 +315,8 @@ if [[ "$USE_MAX_PODS" = "true" ]]; then
         echo "No entry for $INSTANCE_TYPE in $MAX_PODS_FILE. Not setting max pods for kubelet"
     fi
 fi
+
+mkdir -p /etc/systemd/system/kubelet.service.d
 
 cat <<EOF > /etc/systemd/system/kubelet.service.d/10-kubelet-args.conf
 [Service]
@@ -342,3 +346,31 @@ fi
 systemctl daemon-reload
 systemctl enable kubelet
 systemctl start kubelet
+
+# gpu boost clock
+if  command -v nvidia-smi &>/dev/null ; then
+   echo "nvidia-smi found"
+
+   sudo nvidia-smi -pm 1 # set persistence mode
+   sudo nvidia-smi --auto-boost-default=0
+
+   GPUNAME=$(nvidia-smi -L | head -n1)
+   echo $GPUNAME
+
+   # set application clock to maximum
+   if [[ $GPUNAME == *"A100"* ]]; then
+      nvidia-smi -ac 1215,1410
+   elif [[ $GPUNAME == *"V100"* ]]; then
+      nvidia-smi -ac 877,1530
+   elif [[ $GPUNAME == *"K80"* ]]; then
+      nvidia-smi -ac 2505,875
+   elif [[ $GPUNAME == *"T4"* ]]; then
+      nvidia-smi -ac 5001,1590
+   elif [[ $GPUNAME == *"M60"* ]]; then
+      nvidia-smi -ac 2505,1177
+   else
+      echo "unsupported gpu"
+   fi
+else
+    echo "nvidia-smi not found"
+fi
